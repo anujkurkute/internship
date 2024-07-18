@@ -1,45 +1,28 @@
-import pandas as pd
+import os
 import matplotlib.pyplot as plt
+import pandas as pd
 from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestRegressor
 import schedule
 import time
-import os
+from alpha_vantage.timeseries import TimeSeries
 
-def simulate_data():
-    dates = pd.date_range(end=datetime.now(), periods=10).tolist()
-    return pd.DataFrame({
-        'timestamp': dates,
-        'open': [30000 + i * 50 for i in range(10)],
-        'high': [31000 + i * 50 for i in range(10)],
-        'low': [29500 + i * 50 for i in range(10)],
-        'close': [30500 + i * 50 for i in range(10)],
-        'volume': [1000 + i * 10 for i in range(10)]
-    })
+# Replace 'YOUR_API_KEY' with your actual Alpha Vantage API key
+ALPHA_VANTAGE_API_KEY = '06QFYV9IAUPKCDSU'
 
-def preprocess_data(data):
-    data['target'] = data['close'].shift(-1)
-    return data.dropna()
+# Initialize Alpha Vantage TimeSeries
+ts = TimeSeries(key=ALPHA_VANTAGE_API_KEY, output_format='pandas')
 
-def train_model(data):
-    X = data[['open', 'high', 'low', 'close', 'volume']]
-    y = data['target']
-    
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X, y)
-    
-    return model
+def fetch_ohlcv(symbol, interval='1min'):
+    data, meta_data = ts.get_intraday(symbol=symbol, interval=interval, outputsize='full')
+    data.reset_index(inplace=True)
+    data.rename(columns={'date': 'timestamp', '1. open': 'open', '2. high': 'high', '3. low': 'low', '4. close': 'close', '5. volume': 'volume'}, inplace=True)
+    return data
 
-def make_prediction(model, data):
-    X = data[['open', 'high', 'low', 'close', 'volume']].iloc[-1].values.reshape(1, -1)
-    return model.predict(pd.DataFrame(X, columns=['open', 'high', 'low', 'close', 'volume']))[0]
-
-def plot_prediction(data, prediction, symbol, filename):
+def plot_chart(data, title, filename):
     plt.figure(figsize=(10, 5))
-    plt.plot(data['timestamp'], data['close'], label='Actual Close Price', color='b', marker='o')
-    plt.axvline(x=data['timestamp'].iloc[-1], color='r', linestyle='--', label='Prediction Point')
-    plt.scatter(data['timestamp'].iloc[-1] + timedelta(days=1), prediction, color='r', label='Predicted Close Price', marker='x')
-    plt.title(f"{symbol} - Close Price Prediction")
+    plt.plot(data['timestamp'], data['close'], label='Close Price', color='b', marker='o')
+    plt.title(title)
     plt.xlabel('Date')
     plt.ylabel('Price')
     plt.legend()
@@ -47,33 +30,54 @@ def plot_prediction(data, prediction, symbol, filename):
     plt.savefig(filename)
     plt.close()
 
-def fetch_and_predict(symbol):
-    data = simulate_data()
-    data = preprocess_data(data)
-    
-    if len(data) < 9:
-        print(f"Not enough data to train model for {symbol}")
-        return
-    
+def fetch_and_plot(symbol):
+    data = fetch_ohlcv(symbol)
+    directory = os.path.join('D:\\Internship', symbol.replace('/', '_'))
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    filename = os.path.join(directory, f"{symbol.replace('/', '_')}_1d.png")
+    plot_chart(data, f"{symbol} - Last 1 Day", filename)
+    csv_filename = os.path.join(directory, f"{symbol.replace('/', '_')}_1d.csv")
+    data.to_csv(csv_filename, index=False)
+    print(f"Chart and data for {symbol} saved as {filename} and {csv_filename}")
+
+def train_model(data):
+    X = data[['open', 'high', 'low', 'close', 'volume']]
+    y = data['close'].shift(-1).dropna()
+    X = X.iloc[:-1, :]
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X, y)
+    return model
+
+def predict_next_day(symbol):
+    data = fetch_ohlcv(symbol, interval='1min')
     model = train_model(data)
-    prediction = make_prediction(model, data)
+    last_row = data.iloc[-1][['open', 'high', 'low', 'close', 'volume']].values.reshape(1, -1)
+    prediction = model.predict(last_row)
     
-    output_dir = os.path.join('D:\\Internship', symbol.replace('/', '_'))
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    filename = os.path.join(output_dir, f"{symbol.replace('/', '_')}_prediction.png")
-    plot_prediction(data, prediction, symbol, filename)
-    
-    print(f"Predicted closing price for {symbol} on {datetime.now() + timedelta(days=1)}: {prediction}")
-    print(f"Prediction chart saved as {filename}")
+    # Adding the prediction to the data for plotting
+    next_day = data['timestamp'].iloc[-1] + timedelta(minutes=1)
+    data = data.append({'timestamp': next_day, 'close': prediction[0]}, ignore_index=True)
 
-def schedule_prediction():
-    for asset in ['BTC/USDT']:
-        fetch_and_predict(asset)
+    filename = f'D:\\Internship\\{symbol.replace("/", "_")}_prediction.png'
+    plot_chart(data, f"{symbol} - Prediction for Next Day", filename)
+    print(f"Predicted chart for {symbol} saved as {filename}")
 
-schedule.every().day.at("09:00").do(schedule_prediction)
+def job(symbols):
+    for stock in symbols:
+        fetch_and_plot(stock)
+        predict_next_day(stock)
 
-while True:
-    schedule.run_pending()
-    time.sleep(1)
+# Schedule the job to run at 4 AM EST
+def schedule_jobs(stocks):
+    schedule.every().day.at("04:00").do(job, stocks)
+
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+if __name__ == "__main__":
+    input_stocks = input("Enter the stock symbols separated by commas: ").split(',')
+    input_stocks = [stock.strip() for stock in input_stocks]
+    schedule_jobs(input_stocks)
+    job(input_stocks)  # Run the job initially
